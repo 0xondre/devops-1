@@ -1,0 +1,295 @@
+---
+- name: Wdrożenie PostgreSQL
+  hosts: db
+  become: true
+  vars:
+    notes_db_name: notes_db
+    notes_db_user: notes_user
+    notes_db_password: zmien_mnie
+    backend_ip: 192.168.56.11
+  tasks:
+    - name: Zainstaluj PostgreSQL i sterownik Python
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        name:
+          - acl
+          - postgresql
+          - python3-psycopg2
+        state: present
+
+    - name: Wykryj ścieżkę konfiguracji klastra PostgreSQL
+      ansible.builtin.command: pg_lsclusters --no-header
+      register: postgresql_cluster
+      changed_when: false
+
+    - name: Nasłuchuj na interfejsach VM
+      ansible.builtin.lineinfile:
+        path: "/etc/postgresql/{{ postgresql_cluster.stdout.split()[0] }}/main/postgresql.conf"
+        regexp: '^#?listen_addresses\s*='
+        line: "listen_addresses = '*'"
+      notify: Restart PostgreSQL
+
+    - name: Zezwól backendowi na połączenie z bazą
+      ansible.builtin.lineinfile:
+        path: "/etc/postgresql/{{ postgresql_cluster.stdout.split()[0] }}/main/pg_hba.conf"
+        line: "host {{ notes_db_name }} {{ notes_db_user }} {{ backend_ip }}/32 scram-sha-256"
+        insertafter: EOF
+      notify: Restart PostgreSQL
+
+    - name: Włącz PostgreSQL
+      ansible.builtin.service:
+        name: postgresql
+        state: started
+        enabled: true
+
+    - name: Zastosuj zmiany konfiguracji PostgreSQL
+      ansible.builtin.meta: flush_handlers
+
+    - name: Utwórz użytkownika aplikacji
+      become_user: postgres
+      community.postgresql.postgresql_user:
+        name: "{{ notes_db_user }}"
+        password: "{{ notes_db_password }}"
+        state: present
+
+    - name: Utwórz bazę aplikacji
+      become_user: postgres
+      community.postgresql.postgresql_db:
+        name: "{{ notes_db_name }}"
+        owner: "{{ notes_db_user }}"
+        state: present
+
+    - name: Skopiuj schemat bazy
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/db/init.sql"
+        dest: /tmp/notes-init.sql
+        mode: "0644"
+
+    - name: Utwórz tabelę notatek
+      become_user: postgres
+      community.postgresql.postgresql_script:
+        login_db: "{{ notes_db_name }}"
+        path: /tmp/notes-init.sql
+
+  handlers:
+    - name: Restart PostgreSQL
+      ansible.builtin.service:
+        name: postgresql
+        state: restarted
+
+- name: Wdrożenie backendu Flask
+  hosts: backend
+  become: true
+  vars:
+    app_dir: /opt/notes-backend
+    notes_db_password: zmien_mnie
+  tasks:
+    - name: Zainstaluj Python i zależności systemowe
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        name:
+          - python3
+          - python3-venv
+          - python3-pip
+        state: present
+
+    - name: Utwórz użytkownika usługi
+      ansible.builtin.user:
+        name: notes
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ app_dir }}"
+        create_home: false
+
+    - name: Utwórz katalog backendu
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: notes
+        group: notes
+        mode: "0755"
+
+    - name: Skopiuj kod backendu
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/appbackend/"
+        dest: "{{ app_dir }}/"
+        owner: notes
+        group: notes
+        mode: preserve
+      notify: Restart notes-backend
+
+    - name: Zainstaluj zależności aplikacji w virtualenv
+      ansible.builtin.pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        virtualenv: "{{ app_dir }}/venv"
+        virtualenv_command: python3 -m venv
+
+    - name: Skonfiguruj dostęp backendu do bazy
+      ansible.builtin.copy:
+        dest: /etc/notes-backend.env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          DB_HOST=192.168.56.10
+          DB_PORT=5432
+          DB_NAME=notes_db
+          DB_USER=notes_user
+          DB_PASSWORD={{ notes_db_password }}
+      notify: Restart notes-backend
+
+    - name: Zainstaluj jednostkę systemd backendu
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/deploy/notes-backend.service"
+        dest: /etc/systemd/system/notes-backend.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart notes-backend
+
+    - name: Włącz i uruchom backend
+      ansible.builtin.systemd:
+        name: notes-backend
+        daemon_reload: true
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Restart notes-backend
+      ansible.builtin.systemd:
+        name: notes-backend
+        daemon_reload: true
+        state: restarted
+
+- name: Wdrożenie frontendu Angular
+  hosts: frontend
+  become: true
+  vars:
+    frontend_dir: /opt/notes-frontend
+  tasks:
+    - name: Zainstaluj narzędzia do pobrania Node.js
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        name:
+          - ca-certificates
+          - curl
+        state: present
+
+    - name: Sprawdź wersję Node.js
+      ansible.builtin.command: node --version
+      register: current_node_version
+      changed_when: false
+      failed_when: false
+
+    - name: Dodaj repozytorium Node.js 24
+      ansible.builtin.shell: curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+      when: current_node_version.rc != 0 or not current_node_version.stdout.startswith('v24.')
+
+    - name: Odśwież cache APT po dodaniu repozytorium Node.js
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Zaktualizuj Node.js z repozytorium 24.x
+      ansible.builtin.apt:
+        name: nodejs
+        state: latest
+
+    - name: Zainstaluj Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Potwierdź wersję Node.js wymaganą przez Angular 21
+      ansible.builtin.command: node --version
+      register: installed_node_version
+      changed_when: false
+      failed_when: not installed_node_version.stdout.startswith('v24.')
+
+    - name: Utwórz katalog projektu frontendowego
+      ansible.builtin.file:
+        path: "{{ frontend_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Skopiuj projekt frontendowy
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/appfrontend/"
+        dest: "{{ frontend_dir }}/"
+        owner: root
+        group: root
+        mode: preserve
+
+    - name: Usuń pozostałości po nieudanej instalacji npm
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ frontend_dir }}/node_modules"
+        - "{{ frontend_dir }}/package-lock.json"
+
+    - name: Zainstaluj zależności Angular
+      ansible.builtin.command: npm install --no-audit --no-fund
+      args:
+        chdir: "{{ frontend_dir }}"
+
+    - name: Zbuduj frontend Angular
+      ansible.builtin.command: npm run build
+      args:
+        chdir: "{{ frontend_dir }}"
+
+    - name: Utwórz katalog publikacji Nginx
+      ansible.builtin.file:
+        path: /var/www/notes
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    - name: Opublikuj frontend
+      ansible.builtin.copy:
+        src: "{{ frontend_dir }}/dist/notes-frontend/browser/"
+        dest: /var/www/notes/
+        remote_src: true
+        owner: www-data
+        group: www-data
+        mode: preserve
+      notify: Restart nginx
+
+    - name: Skonfiguruj Nginx
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/deploy/nginx-frontend.conf"
+        dest: /etc/nginx/sites-available/notes
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart nginx
+
+    - name: Włącz konfigurację witryny
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/notes
+        dest: /etc/nginx/sites-enabled/notes
+        state: link
+      notify: Restart nginx
+
+    - name: Wyłącz domyślną witrynę Nginx
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Restart nginx
+
+    - name: Włącz i uruchom Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Restart nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted

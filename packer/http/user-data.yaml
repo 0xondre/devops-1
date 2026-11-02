@@ -1,0 +1,13 @@
+#cloud-config
+autoinstall:
+  version: 1
+  identity:
+    hostname: ubuntu-base
+    username: packer
+    password: "$6$2S41t9kduF1PBWaB$dSjIf/6dx.EnP1vXlvJ3/A8ZTqzPXIj07uFQ9UaaET0bveRNp1rcIjLd.xoKbMEhy9Y7HCVOGyW9zqErgzFOV0"
+  ssh:
+    install-server: true
+    allow-pw: true
+  storage:
+    layout:
+      name: direct
