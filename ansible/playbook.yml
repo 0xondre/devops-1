@@ -1,4 +1,64 @@
 ---
+- name: Skonfiguruj zaporę na wszystkich VM
+  hosts: all
+  become: true
+  tasks:
+    - name: Zainstaluj UFW
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+
+    - name: Zezwól na SSH do zarządzania VM
+      community.general.ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+
+    - name: Zezwól backendowi na dostęp do PostgreSQL
+      community.general.ufw:
+        rule: allow
+        from_ip: 192.168.56.11
+        port: "5432"
+        proto: tcp
+      when: "'db' in group_names"
+
+    - name: Zezwól frontendowi na dostęp do backendu
+      community.general.ufw:
+        rule: allow
+        from_ip: 192.168.56.12
+        port: "5000"
+        proto: tcp
+      when: "'backend' in group_names"
+
+    - name: Zachowaj lokalny port API przekierowany przez Vagrant
+      community.general.ufw:
+        rule: allow
+        from_ip: 10.0.2.0/24
+        port: "5000"
+        proto: tcp
+      when: "'backend' in group_names"
+
+    - name: Zezwól na HTTP do frontendu
+      community.general.ufw:
+        rule: allow
+        port: "80"
+        proto: tcp
+      when: "'frontend' in group_names"
+
+    - name: Zablokuj pozostały ruch przychodzący
+      community.general.ufw:
+        direction: incoming
+        default: deny
+
+    - name: Zezwól na ruch wychodzący
+      community.general.ufw:
+        direction: outgoing
+        default: allow
+
+    - name: Włącz zaporę
+      community.general.ufw:
+        state: enabled
+
 - name: Wdrożenie PostgreSQL
   hosts: db
   become: true

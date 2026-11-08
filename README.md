@@ -57,6 +57,10 @@ ansible-playbook playbook.yml
 
 Playbook konfiguruje bazę i dostęp sieciowy dla backendu, instaluje usługę Flask/Gunicorn, buduje frontend Angular i konfiguruje Nginx.
 
+Zapora UFW jest włączana na wszystkich trzech VM. Ruch przychodzący jest domyślnie blokowany, a wychodzący dozwolony. Wyjątki to SSH (22) na każdej VM, PostgreSQL (5432) tylko z backendu, backend (5000) z frontendu i sieci NAT Vagranta oraz HTTP (80) na frontendzie. Dzięki wyjątkowi dla NAT nadal działa lokalny adres API `http://localhost:8000`. Przekierowania Vagranta są związane z `127.0.0.1` hosta.
+
+Stan reguł po wdrożeniu sprawdzisz z katalogu `ansible`: `ansible all -b -a "ufw status verbose"`.
+
 ### 4. Otwórz aplikację
 
 - Frontend: <http://localhost:8080>
